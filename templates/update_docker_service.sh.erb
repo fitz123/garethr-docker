@@ -1,23 +1,95 @@
 #!/bin/bash
 #
-# Find all container's images for passed label
-# Pulls a docker image
-# Kills containers if image has been updated
-# _Assumed_ that Systemd recreates container with new image
+# update case: `update_docker_service.sh gcorelu`
+# for every container will do:
+#   1. Check image in registry, if there's an update, then
+#   3. Mark currently used image as "previous"
+#   3. Kills container
+#     _Assumed_ that Systemd re-creates container using new image
+#
+# rollback case: `update_docker_service.sh gcorelu rollback`
+# for every container will do:
+#   1. Check if image with "previous" tag is locally available
+#   2. Tag "previous" image as current
+#   3. Kills container
+#
+# In case at least 1 container has been rolled back,
+# further service update is disabled.
+# one have to manually resolve an issue and remove $LOCKFILE
 #
 
 DOCKER_LABEL=$1
+LOCKFILE="/tmp/update-${DOCKER_LABEL}.lock"
+DOCKER_CMD='<%= @docker_command -%>'
+
+# Logging
+Msg() {
+    if [ "${1:0:4}" = '[ERR' -o "${1:0:6}" = '[CRIT]' ]; then
+        echo -e `date '+%Y/%m/%d %H:%M:%S'` '\e[31m'"$@"'\e[0m' >&2;
+        logger "$@";
+    elif [ "${1:0:5}" = '[WARN' ]; then
+        echo -e `date '+%Y/%m/%d %H:%M:%S'` '\e[35m'"$@"'\e[0m' >&2;
+        logger "$@";
+    else
+        echo -e `date '+%Y/%m/%d %H:%M:%S'` '\e[32m[INFO] '"$@"'\e[0m' >&1;
+        logger "[INFO] $@";
+    fi
+}
+
+# check if previous image is available for every container
+check_prev_images() {
+    $DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" | while read container; do
+        container_name=$($DOCKER_CMD inspect --format='{{.Name}}' $container 2>/dev/null);
+        img_conf=$($DOCKER_CMD inspect --format='{{.Config.Image}}' $container 2>/dev/null);
+        img_prev=$(echo ${img_conf} | sed 's/\(:.*$\|$\)/:previous/' 2>/dev/null);
+        prev_count=$($DOCKER_CMD images -q --filter "reference=${img_prev}" 2>/dev/null | wc -l);
+        if [ "${prev_count}" -eq "0" ]; then
+            Msg "[ERR] Cannot rollback container: "${container_name}" due to missing previous image. Aborting rollback.";
+            return 1;
+        fi
+    done;
+}
+
+rollback() {
+    prev_sha=$($DOCKER_CMD inspect --format='{{.ID}}' $img_prev 2>/dev/null);
+    if [ "${img_used}" != "${prev_sha}" ]; then
+        $DOCKER_CMD tag $img_prev $img_conf &>/dev/null;
+        $DOCKER_CMD kill $container &>/dev/null;
+        Msg "Container: "${container_name}" is rolled back.";
+        echo > "${LOCKFILE}";
+    else
+        Msg "[WARN] Previous image for container: "${container_name}" the same as current. Skipping rollback."
+    fi
+}
 
 # check deps
-declare -a deps=("update_docker_image.sh")
+declare -a deps=("update_docker_image.sh" "docker")
 for dep in "${deps[@]}"; do
     command -v "$dep" >/dev/null 2>&1 \
-        || { echo >&2 "I require $dep but it's not installed. Aborting."; exit 1; }
+        || { Msg "[ERR] I require $dep but it's not installed. Aborting."; kill -s TERM $TOP_PID; }
 done
 
-<%= @docker_command -%> ps -q --filter="label=$DOCKER_LABEL" | while read container; do
-    image=$(<%= @docker_command -%> inspect --format='{{.Config.Image}}' $container);
-    if update_docker_image.sh $image; then
-        <%= @docker_command -%> kill $container;
-    fi;
+# check if update for the service is locked due to previous rollback
+if [ -f "${LOCKFILE}" ]; then
+    Msg "[WARN] Update for service with label: "${DOCKER_LABEL}" is locked. Please remove the lock file: "${LOCKFILE};
+    exit 1;
+fi
+
+$DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" | while read container; do
+    container_name=$($DOCKER_CMD inspect --format='{{.Name}}' $container 2>/dev/null);
+    img_conf=$($DOCKER_CMD inspect --format='{{.Config.Image}}' $container 2>/dev/null);
+    img_used=$($DOCKER_CMD inspect --format='{{.Image}}' $container 2>/dev/null);
+    img_prev=$(echo ${img_conf} | sed 's/\(:.*$\|$\)/:previous/' 2>/dev/null);
+    if [ "$2" == "rollback" ]; then
+        check_prev_images || exit 1;
+        rollback;
+    else
+        if update_docker_image.sh $img_conf &>/dev/null; then
+            $DOCKER_CMD tag $img_used $img_prev &>/dev/null;
+            $DOCKER_CMD kill $container &>/dev/null;
+            Msg "Container: "${container_name}" is updated.";
+        else
+            Msg "Container: "${container_name}" is up-to-date.";
+        fi
+    fi
 done
