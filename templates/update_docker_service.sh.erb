@@ -99,7 +99,7 @@ $DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" | while read container; do
             Msg "[WARN] Cannot pull the image: "${img_conf}" for: "${container_name};
         else
             Msg "[ERR] Unknown error. Aborting.";
-            exit 1
+            exit 1;
         fi
     fi
 done
@@ -116,4 +116,5 @@ if [ "$BEFORE" -ne "$AFTER" -a "$2" != "rollback" ]; then
     Msg "[WARN] Something went wrong";
     Msg "Before update services running: "${BEFORE};
     Msg "After update services running: "${AFTER};
+    exit 1;
 fi
