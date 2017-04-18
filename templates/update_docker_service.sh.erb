@@ -62,6 +62,10 @@ rollback() {
     fi
 }
 
+count_services() {
+    $DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" --filter status=running | wc -l;
+}
+
 # check deps
 declare -a deps=("update_docker_image.sh" "docker")
 for dep in "${deps[@]}"; do
@@ -75,6 +79,7 @@ if [ -f "${LOCKFILE}" ]; then
     exit 1;
 fi
 
+BEFORE=$(count_services);
 $DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" | while read container; do
     container_name=$($DOCKER_CMD inspect --format='{{.Name}}' $container 2>/dev/null);
     img_conf=$($DOCKER_CMD inspect --format='{{.Config.Image}}' $container 2>/dev/null);
@@ -87,9 +92,28 @@ $DOCKER_CMD ps -q --filter="label=$DOCKER_LABEL" | while read container; do
         if update_docker_image.sh $img_conf &>/dev/null; then
             $DOCKER_CMD tag $img_used $img_prev &>/dev/null;
             $DOCKER_CMD kill $container &>/dev/null;
-            Msg "Container: "${container_name}" is updated.";
+            Msg "Container: "${container_name}" has been updated.";
+        elif [ "$?" -eq "1" ]; then
+            Msg "Container: "${container_name}" is already up-to-date.";
+        elif [ "$?" -eq "3" ]; then
+            Msg "[WARN] Cannot pull the image: "${img_conf}" for: "${container_name};
         else
-            Msg "Container: "${container_name}" is up-to-date.";
+            Msg "[ERR] Unknown error. Aborting.";
+            exit 1
         fi
     fi
 done
+
+AFTER=$(count_services);
+until [ "$BEFORE" -eq "$AFTER" ]; do
+    sleep 5;
+    AFTER=$(count_services);
+    let tries++;
+    (( tries > 6 )) && break;
+done
+
+if [ "$BEFORE" -ne "$AFTER" -a "$2" != "rollback" ]; then
+    Msg "[WARN] Something went wrong";
+    Msg "Before update services running: "${BEFORE};
+    Msg "After update services running: "${AFTER};
+fi
