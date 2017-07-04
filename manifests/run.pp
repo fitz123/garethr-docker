@@ -99,6 +99,7 @@ define docker::run(
   include docker::params
   $docker_command = $docker::params::docker_command
   $service_name = $docker::params::service_name
+  $custom_init_template = $docker::custom_init_template
 
   validate_re($image, '^[\S]*$')
   validate_re($title, '^[\S]*$')
@@ -283,9 +284,13 @@ define docker::run(
 
     }
     else {
+      $final_init_template = $custom_init_template ? {
+        String  => $custom_init_template,
+        default => $init_template,
+      }
       file { $initscript:
         ensure  => present,
-        content => template($init_template),
+        content => template($final_init_template),
         mode    => $mode,
       }
 
